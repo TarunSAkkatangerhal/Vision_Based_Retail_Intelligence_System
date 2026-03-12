@@ -1,0 +1,69 @@
+# ──────────────────────────────────────────────
+# Python
+# ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ──────────────────────────────────────────────
+# Virtual environments
+# ──────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ──────────────────────────────────────────────
+# IDE / Editor
+# ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ──────────────────────────────────────────────
+# OS files
+# ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ──────────────────────────────────────────────
+# YOLO / Training artifacts
+# ──────────────────────────────────────────────
+runs/
+wandb/
+*.pt
+!yolov8n.pt
+
+# ──────────────────────────────────────────────
+# Database
+# ──────────────────────────────────────────────
+*.db
+
+# ──────────────────────────────────────────────
+# Dataset images & videos (large files)
+# ──────────────────────────────────────────────
+dataset/images/train/*
+dataset/images/val/*
+dataset/labels/train/*
+dataset/labels/val/*
+dataset/sample_video.mp4
+
+# Keep the folder structure
+!dataset/images/train/.gitkeep
+!dataset/images/val/.gitkeep
+!dataset/labels/train/.gitkeep
+!dataset/labels/val/.gitkeep
+
+# ──────────────────────────────────────────────
+# Logs / Misc
+# ──────────────────────────────────────────────
+*.log
+.env

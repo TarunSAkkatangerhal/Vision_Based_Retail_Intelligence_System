@@ -1,0 +1,7 @@
+opencv-python
+ultralytics
+numpy
+torch
+pydantic
+requests
+deep_sort_realtime
