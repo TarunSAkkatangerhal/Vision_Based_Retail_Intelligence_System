@@ -1,6 +1,8 @@
+import json
 import logging
+import os
 from collections import defaultdict
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import numpy as np
 
@@ -15,15 +17,73 @@ from shared.utils import get_current_timestamp
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
-# Shelf region mapping
+# Shelf region mapping — loaded from shelf_config.json
 # ──────────────────────────────────────────────
-# Maps pixel-space x-ranges to logical shelf IDs.
-# Adjust these regions to match your camera layout.
-SHELF_REGIONS = {
+# Fallback: hardcoded equal-split regions (used when no config exists)
+_DEFAULT_SHELF_REGIONS = {
     "shelf_A": (0, 213),
     "shelf_B": (213, 426),
     "shelf_C": (426, 640),
 }
+
+# Full shelf config (loaded from JSON calibration file)
+# Each entry: {"name": str, "x_min": int, "y_min": int, "x_max": int, "y_max": int, "expected_products": list}
+_SHELF_CONFIG: List[Dict] = []
+
+# Simple x-range mapping used by _assign_shelf (legacy compat)
+SHELF_REGIONS: Dict[str, tuple] = {}
+
+
+def _get_config_path() -> str:
+    """Return the path to shelf_config.json."""
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "shelf_config.json")
+
+
+def load_shelf_config() -> None:
+    """Load shelf regions from shelf_config.json (created by calibrate_shelves.py)."""
+    global SHELF_REGIONS, _SHELF_CONFIG
+
+    config_path = _get_config_path()
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            _SHELF_CONFIG = config.get("shelves", [])
+            SHELF_REGIONS = {
+                s["name"]: (s["x_min"], s["x_max"])
+                for s in _SHELF_CONFIG
+            }
+            logger.info("Loaded %d shelf region(s) from %s", len(SHELF_REGIONS), config_path)
+            for s in _SHELF_CONFIG:
+                prods = ", ".join(s.get("expected_products", [])) or "(any)"
+                logger.info("  %s: (%d,%d)-(%d,%d)  products: %s",
+                            s["name"], s["x_min"], s["y_min"], s["x_max"], s["y_max"], prods)
+        except (json.JSONDecodeError, KeyError) as exc:
+            logger.warning("Failed to parse %s: %s — using defaults.", config_path, exc)
+            SHELF_REGIONS = dict(_DEFAULT_SHELF_REGIONS)
+            _SHELF_CONFIG = []
+    else:
+        logger.warning("No shelf_config.json found — using default equal-split regions. "
+                       "Run 'python calibrate_shelves.py' to calibrate.")
+        SHELF_REGIONS = dict(_DEFAULT_SHELF_REGIONS)
+        _SHELF_CONFIG = []
+
+
+def get_shelf_config() -> List[Dict]:
+    """Return the loaded shelf config (full details including expected_products)."""
+    return list(_SHELF_CONFIG)
+
+
+def get_expected_products(shelf_name: str) -> List[str]:
+    """Return the expected products for a given shelf (empty list if not configured)."""
+    for s in _SHELF_CONFIG:
+        if s["name"] == shelf_name:
+            return s.get("expected_products", [])
+    return []
+
+
+# Load config at import time
+load_shelf_config()
 
 # ──────────────────────────────────────────────
 # Shelf state tracking (across frames)
@@ -45,11 +105,26 @@ def reset_shelf_tracking() -> None:
 
 
 def _assign_shelf(bbox: list[float]) -> str:
-    """Return the shelf_id for a detection based on bbox centre-x."""
+    """Return the shelf_id for a detection based on bbox centre point.
+
+    If full calibration data is available (with y ranges), uses both x and y.
+    Otherwise falls back to x-range only.
+    """
     cx = (bbox[0] + bbox[2]) / 2
+    cy = (bbox[1] + bbox[3]) / 2
+
+    # Try full bounding-box match first (calibrated shelves have y ranges)
+    if _SHELF_CONFIG:
+        for shelf in _SHELF_CONFIG:
+            if (shelf["x_min"] <= cx <= shelf["x_max"] and
+                    shelf["y_min"] <= cy <= shelf["y_max"]):
+                return shelf["name"]
+
+    # Fallback: x-range only
     for shelf_id, (x_min, x_max) in SHELF_REGIONS.items():
         if x_min <= cx < x_max:
             return shelf_id
+
     return "shelf_unknown"
 
 

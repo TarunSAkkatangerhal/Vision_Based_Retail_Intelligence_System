@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 from typing import Dict, Any, List, Tuple
 
 import numpy as np
@@ -18,13 +20,46 @@ from vision.interaction import detect_interaction
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
-# Shelf regions (pixel-space) — must match inventory.py mapping
+# Shelf regions — loaded from shelf_config.json (shared with inventory.py)
 # ──────────────────────────────────────────────
-SHELF_REGIONS: List[Dict] = [
+_DEFAULT_SHELF_REGIONS: List[Dict] = [
     {"shelf_id": "shelf_A", "x_min": 0, "x_max": 213, "y_min": 0, "y_max": 480},
     {"shelf_id": "shelf_B", "x_min": 213, "x_max": 426, "y_min": 0, "y_max": 480},
     {"shelf_id": "shelf_C", "x_min": 426, "x_max": 640, "y_min": 0, "y_max": 480},
 ]
+
+SHELF_REGIONS: List[Dict] = []
+
+
+def _load_shelf_regions() -> List[Dict]:
+    """Load shelf regions from shelf_config.json or use defaults."""
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "shelf_config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            regions = []
+            for s in config.get("shelves", []):
+                regions.append({
+                    "shelf_id": s["name"],
+                    "x_min": s["x_min"],
+                    "x_max": s["x_max"],
+                    "y_min": s["y_min"],
+                    "y_max": s["y_max"],
+                })
+            if regions:
+                logger.info("Customer tracking: loaded %d shelf region(s) from %s",
+                            len(regions), config_path)
+                return regions
+        except (json.JSONDecodeError, KeyError) as exc:
+            logger.warning("Failed to parse %s: %s — using defaults.", config_path, exc)
+    logger.warning("Customer tracking: using default shelf regions. "
+                   "Run 'python calibrate_shelves.py' to calibrate.")
+    return list(_DEFAULT_SHELF_REGIONS)
+
+
+# Load at import time
+SHELF_REGIONS = _load_shelf_regions()
 
 # ──────────────────────────────────────────────
 # Lazy-loaded singletons
@@ -62,7 +97,8 @@ def _get_tracker():
 def _get_shelf_for_position(cx: float, cy: float) -> str:
     """Return the shelf_id that contains the given centre point."""
     for region in SHELF_REGIONS:
-        if region["x_min"] <= cx <= region["x_max"] and region["y_min"] <= cy <= region["y_max"]:
+        if (region["x_min"] <= cx <= region["x_max"] and
+                region["y_min"] <= cy <= region["y_max"]):
             return region["shelf_id"]
     return "shelf_unknown"
 
