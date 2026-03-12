@@ -1,6 +1,6 @@
 import logging
 from collections import defaultdict
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 import numpy as np
 
@@ -24,6 +24,24 @@ SHELF_REGIONS = {
     "shelf_B": (213, 426),
     "shelf_C": (426, 640),
 }
+
+# ──────────────────────────────────────────────
+# Shelf state tracking (across frames)
+# ──────────────────────────────────────────────
+# Previous frame's item count per shelf — used to detect changes
+_previous_shelf_counts: Dict[str, int] = {}
+_shelf_change_log: List[str] = []
+
+
+def get_shelf_changes() -> List[str]:
+    """Return the list of shelf change events detected so far."""
+    return list(_shelf_change_log)
+
+
+def reset_shelf_tracking() -> None:
+    """Clear shelf tracking state (useful for tests)."""
+    _previous_shelf_counts.clear()
+    _shelf_change_log.clear()
 
 
 def _assign_shelf(bbox: list[float]) -> str:
@@ -78,6 +96,13 @@ def detect_inventory(frame: np.ndarray) -> Dict[str, Any]:
     """
     Analyse a single frame and return an Inventory Schema dict.
 
+    Uses a dual-model approach:
+      - Trained model identifies the 14 known product classes by name.
+      - General model catches ANY other item on the shelf as "unknown_item".
+
+    Also tracks shelf state changes across frames and logs events like
+    "item taken from shelf_A" or "shelf_B is now empty".
+
     When MOCK_MODE is True the function returns hardcoded sample data
     without loading any model.
     """
@@ -89,12 +114,49 @@ def detect_inventory(frame: np.ndarray) -> Dict[str, Any]:
 
     detections = detect_products(frame)
 
-    # Group detections by (shelf_id, product_name) and count
+    # ── Group detections by shelf ──
+    shelf_total_counts: Dict[str, int] = defaultdict(int)
     shelf_product_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
     for det in detections:
         shelf_id = _assign_shelf(det["bbox"])
         shelf_product_counts[shelf_id][det["product_name"]] += 1
+        shelf_total_counts[shelf_id] += 1
 
+    # Ensure all known shelves appear in counts (even if 0)
+    for shelf_id in SHELF_REGIONS:
+        if shelf_id not in shelf_total_counts:
+            shelf_total_counts[shelf_id] = 0
+
+    # ── Detect shelf state changes ──
+    timestamp = get_current_timestamp()
+    for shelf_id in SHELF_REGIONS:
+        current_count = shelf_total_counts[shelf_id]
+        previous_count = _previous_shelf_counts.get(shelf_id, -1)
+
+        if previous_count == -1:
+            # First frame — just record baseline
+            pass
+        elif current_count < previous_count:
+            diff = previous_count - current_count
+            event = (f"[{timestamp}] {diff} item(s) TAKEN from {shelf_id} "
+                     f"(was {previous_count}, now {current_count})")
+            _shelf_change_log.append(event)
+            logger.warning(event)
+            if current_count == 0:
+                event_empty = f"[{timestamp}] {shelf_id} is now EMPTY!"
+                _shelf_change_log.append(event_empty)
+                logger.warning(event_empty)
+        elif current_count > previous_count and previous_count >= 0:
+            diff = current_count - previous_count
+            event = (f"[{timestamp}] {diff} item(s) PLACED on {shelf_id} "
+                     f"(was {previous_count}, now {current_count})")
+            _shelf_change_log.append(event)
+            logger.info(event)
+
+        _previous_shelf_counts[shelf_id] = current_count
+
+    # ── Build product list ──
     products: list[ProductItem] = []
     for shelf_id, product_map in shelf_product_counts.items():
         for product_name, count in product_map.items():
@@ -114,26 +176,41 @@ def detect_inventory(frame: np.ndarray) -> Dict[str, Any]:
                 )
             )
 
-    # If no products detected at all, report every shelf as empty
+    # Report shelves with zero items
     if not products:
         for shelf_id in SHELF_REGIONS:
             products.append(
                 ProductItem(
-                    product_name="unknown",
+                    product_name="no_items",
                     shelf_id=shelf_id,
                     count=0,
                     status="empty",
                 )
             )
+    else:
+        # Also add empty entries for shelves that had no detections
+        shelves_with_products = {p.shelf_id for p in products}
+        for shelf_id in SHELF_REGIONS:
+            if shelf_id not in shelves_with_products:
+                products.append(
+                    ProductItem(
+                        product_name="no_items",
+                        shelf_id=shelf_id,
+                        count=0,
+                        status="empty",
+                    )
+                )
 
     inventory = InventoryData(
         schema_version="1.0",
-        timestamp=get_current_timestamp(),
+        timestamp=timestamp,
         camera_id=CAMERA_ID,
         products=products,
     )
 
     # Validate via Pydantic and return dict
     validated = InventoryData.model_validate(inventory.model_dump())
-    logger.info("Inventory detected: %d product entries.", len(validated.products))
+    total_items = sum(shelf_total_counts.values())
+    logger.info("Inventory: %d total items across %d shelves, %d product entries.",
+                total_items, len(SHELF_REGIONS), len(validated.products))
     return validated.model_dump()

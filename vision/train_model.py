@@ -49,8 +49,8 @@ def train() -> None:
         exist_ok=True,
     )
 
-    # The best weights are saved by ultralytics under runs/train/inventory/weights/best.pt
-    best_weights = Path("runs/train/inventory/weights/best.pt")
+    # The best weights are saved by ultralytics under runs/detect/runs/train/inventory/weights/best.pt
+    best_weights = Path("runs/detect/runs/train/inventory/weights/best.pt")
     if not best_weights.exists():
         logger.error("Training completed but best.pt not found at %s", best_weights)
         return
