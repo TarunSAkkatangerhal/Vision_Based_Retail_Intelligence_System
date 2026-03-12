@@ -91,6 +91,7 @@ load_shelf_config()
 # Previous frame's item count per shelf — used to detect changes
 _previous_shelf_counts: Dict[str, int] = {}
 _shelf_change_log: List[str] = []
+_MAX_CHANGE_LOG = 500
 
 
 def get_shelf_changes() -> List[str]:
@@ -167,7 +168,7 @@ def _mock_inventory() -> dict:
 # Main detection entry-point
 # ──────────────────────────────────────────────
 
-def detect_inventory(frame: np.ndarray) -> Dict[str, Any]:
+def detect_inventory(frame: np.ndarray, detections: Optional[list] = None) -> Dict[str, Any]:
     """
     Analyse a single frame and return an Inventory Schema dict.
 
@@ -180,14 +181,18 @@ def detect_inventory(frame: np.ndarray) -> Dict[str, Any]:
 
     When MOCK_MODE is True the function returns hardcoded sample data
     without loading any model.
+
+    Args:
+        frame: BGR frame (used only if detections is None).
+        detections: Pre-computed product detections list.  If provided,
+                    skips calling detect_products() again.
     """
     if MOCK_MODE:
         return _mock_inventory()
 
-    # Import here so the model is only loaded when actually needed
-    from vision.product_detection import detect_products
-
-    detections = detect_products(frame)
+    if detections is None:
+        from vision.product_detection import detect_products
+        detections = detect_products(frame)
 
     # ── Group detections by shelf ──
     shelf_total_counts: Dict[str, int] = defaultdict(int)
@@ -230,6 +235,10 @@ def detect_inventory(frame: np.ndarray) -> Dict[str, Any]:
             logger.info(event)
 
         _previous_shelf_counts[shelf_id] = current_count
+
+    # Trim change log to prevent unbounded growth
+    if len(_shelf_change_log) > _MAX_CHANGE_LOG:
+        _shelf_change_log[:] = _shelf_change_log[-_MAX_CHANGE_LOG:]
 
     # ── Build product list ──
     products: list[ProductItem] = []

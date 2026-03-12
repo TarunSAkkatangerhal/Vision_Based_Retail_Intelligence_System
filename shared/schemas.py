@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Literal
+from typing import List, Literal, Optional
 from datetime import datetime
 
 
@@ -29,7 +29,8 @@ class CustomerItem(BaseModel):
     customer_id: str
     shelf_id: str
     dwell_time_seconds: int
-    interaction: Literal["none", "picked_product", "replaced_product"]
+    interaction: Literal["none", "picked_product", "replaced_product", "interested_no_buy"]
+    item_image_path: Optional[str] = None
 
 
 class CustomerBehaviorData(BaseModel):

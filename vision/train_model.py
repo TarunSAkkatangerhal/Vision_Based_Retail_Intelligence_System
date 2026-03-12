@@ -19,14 +19,14 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ──────────────────────────────────────────────
 
-DATASET_YAML = "dataset/data.yaml"
-BASE_MODEL = "yolov8n.pt"               # pretrained YOLOv8 nano
+DATASET_YAML = "dataset/SKU-110K/data.yaml"
+BASE_MODEL = "yolov8x.pt"               # pretrained YOLOv8 extra-large
 OUTPUT_DIR = Path("models")
 OUTPUT_MODEL = OUTPUT_DIR / "inventory_yolo.pt"
 
-EPOCHS = 50
-IMAGE_SIZE = 640
-BATCH_SIZE = 16
+EPOCHS = 100
+IMAGE_SIZE = 1280
+BATCH_SIZE = 4
 
 
 def train() -> None:

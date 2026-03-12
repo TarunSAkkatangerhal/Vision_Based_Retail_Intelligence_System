@@ -46,9 +46,16 @@ def init_db() -> None:
             shelf_id            TEXT NOT NULL,
             dwell_time_seconds  INTEGER NOT NULL,
             interaction         TEXT NOT NULL,
+            item_image_path     TEXT DEFAULT NULL,
             created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Migration: add item_image_path if missing (existing databases)
+    try:
+        cursor.execute("ALTER TABLE customer_logs ADD COLUMN item_image_path TEXT DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass  # column already exists
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS promotions (
@@ -59,6 +66,24 @@ def init_db() -> None:
             suggested_action  TEXT NOT NULL,
             generated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
+    """)
+
+    # ── Indexes for query performance ──
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_inv_shelf_ts
+        ON inventory_logs(shelf_id, timestamp DESC)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cust_shelf_ts
+        ON customer_logs(shelf_id, timestamp DESC)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cust_timestamp
+        ON customer_logs(timestamp DESC)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_inv_timestamp
+        ON inventory_logs(timestamp DESC)
     """)
 
     conn.commit()
@@ -130,8 +155,8 @@ def insert_customers(data: Dict[str, Any]) -> int:
             """
             INSERT INTO customer_logs
                 (schema_version, timestamp, camera_id, customer_id, shelf_id,
-                 dwell_time_seconds, interaction)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 dwell_time_seconds, interaction, item_image_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 schema_version,
@@ -141,6 +166,7 @@ def insert_customers(data: Dict[str, Any]) -> int:
                 customer["shelf_id"],
                 customer["dwell_time_seconds"],
                 customer["interaction"],
+                customer.get("item_image_path"),
             ),
         )
         rows_inserted += 1
@@ -200,6 +226,44 @@ def insert_promotions(promotions: List[Dict[str, Any]]) -> int:
     conn.close()
     logger.info("Inserted %d promotion records.", rows_inserted)
     return rows_inserted
+
+
+def get_inventory_logs(shelf_id: str | None = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """Return recent inventory log entries, optionally filtered by shelf."""
+    conn = _get_connection()
+    cursor = conn.cursor()
+    if shelf_id:
+        cursor.execute(
+            "SELECT * FROM inventory_logs WHERE shelf_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (shelf_id, limit),
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM inventory_logs ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_customer_logs(shelf_id: str | None = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """Return recent customer behaviour log entries, optionally filtered by shelf."""
+    conn = _get_connection()
+    cursor = conn.cursor()
+    if shelf_id:
+        cursor.execute(
+            "SELECT * FROM customer_logs WHERE shelf_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (shelf_id, limit),
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM customer_logs ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return rows
 
 
 def check_health() -> bool:

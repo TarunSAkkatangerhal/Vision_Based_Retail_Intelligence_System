@@ -1,5 +1,9 @@
 import logging
-import time
+import sys
+from pathlib import Path
+
+# Ensure project root is on sys.path so 'shared' package can be imported
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 import plotly.express as px
@@ -24,9 +28,10 @@ st.title("🛒 Retail Intelligence Dashboard")
 
 
 # ──────────────────────────────────────────────
-# API helpers
+# API helpers (cached with 30-second TTL)
 # ──────────────────────────────────────────────
 
+@st.cache_data(ttl=30)
 def fetch_health() -> dict | None:
     """GET /health from the backend API."""
     try:
@@ -38,6 +43,7 @@ def fetch_health() -> dict | None:
         return None
 
 
+@st.cache_data(ttl=30)
 def fetch_promotions() -> dict | None:
     """GET /promotions from the backend API."""
     try:
@@ -49,6 +55,7 @@ def fetch_promotions() -> dict | None:
         return None
 
 
+@st.cache_data(ttl=30)
 def fetch_inventory_logs() -> list | None:
     """GET /inventory/logs if available, else return None."""
     try:
@@ -59,6 +66,7 @@ def fetch_inventory_logs() -> list | None:
         return None
 
 
+@st.cache_data(ttl=30)
 def fetch_customer_logs() -> list | None:
     """GET /customers/logs if available, else return None."""
     try:
@@ -138,6 +146,137 @@ else:
 
 
 # ──────────────────────────────────────────────
+# 🛍️ Purchase Tracking — Bought vs Interested
+# ──────────────────────────────────────────────
+
+st.header("🛍️ Purchase Tracking")
+
+if cust_logs:
+    cust_df = pd.DataFrame(cust_logs)
+    if not cust_df.empty and "interaction" in cust_df.columns:
+
+        # Map interactions to friendly labels
+        label_map = {
+            "picked_product": "✅ Bought",
+            "replaced_product": "🔄 Put Back",
+            "interested_no_buy": "👀 Interested (no buy)",
+            "none": "🚶 Passed By",
+        }
+        cust_df["status"] = cust_df["interaction"].map(label_map).fillna(cust_df["interaction"])
+
+        # ── KPI cards row ──
+        total = len(cust_df)
+        bought = len(cust_df[cust_df["interaction"] == "picked_product"])
+        replaced = len(cust_df[cust_df["interaction"] == "replaced_product"])
+        interested = len(cust_df[cust_df["interaction"] == "interested_no_buy"])
+        conversion = (bought / total * 100) if total > 0 else 0
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Total Visits", total)
+        k2.metric("✅ Bought", bought)
+        k3.metric("👀 Interested (no buy)", interested)
+        k4.metric("🔄 Put Back", replaced)
+        k5.metric("Conversion Rate", f"{conversion:.1f}%")
+
+        # ── Per-shelf breakdown ──
+        st.subheader("Per-Shelf Breakdown")
+        shelf_filter = st.selectbox(
+            "Filter by shelf", ["All Shelves"] + sorted(cust_df["shelf_id"].unique().tolist())
+        )
+        if shelf_filter != "All Shelves":
+            filtered = cust_df[cust_df["shelf_id"] == shelf_filter]
+        else:
+            filtered = cust_df
+
+        # Interaction pie chart + table side by side
+        col_chart, col_table = st.columns([1, 1])
+
+        with col_chart:
+            interaction_counts = filtered["status"].value_counts().reset_index()
+            interaction_counts.columns = ["Status", "Count"]
+            fig_pie = px.pie(
+                interaction_counts,
+                names="Status",
+                values="Count",
+                title="Customer Interactions",
+                color="Status",
+                color_discrete_map={
+                    "✅ Bought": "#2ecc71",
+                    "🔄 Put Back": "#f39c12",
+                    "👀 Interested (no buy)": "#e74c3c",
+                    "🚶 Passed By": "#3498db",
+                },
+            )
+            fig_pie.update_traces(textinfo="value+percent")
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        with col_table:
+            # Per-shelf summary table
+            summary = filtered.groupby("shelf_id").agg(
+                visits=("interaction", "count"),
+                bought=("interaction", lambda x: (x == "picked_product").sum()),
+                put_back=("interaction", lambda x: (x == "replaced_product").sum()),
+                interested=("interaction", lambda x: (x == "interested_no_buy").sum()),
+                avg_dwell=("dwell_time_seconds", "mean"),
+            ).reset_index()
+            summary["conversion"] = (summary["bought"] / summary["visits"] * 100).round(1)
+            summary["avg_dwell"] = summary["avg_dwell"].round(1)
+            summary.columns = ["Shelf", "Visits", "Bought", "Put Back", "Interested", "Avg Dwell (s)", "Conversion %"]
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+
+        # ── Conversion over time ──
+        st.subheader("Conversion Over Time")
+        if "timestamp" in filtered.columns:
+            time_df = filtered.copy()
+            time_df["timestamp"] = pd.to_datetime(time_df["timestamp"], errors="coerce")
+            time_df = time_df.dropna(subset=["timestamp"])
+            if not time_df.empty:
+                time_df["minute"] = time_df["timestamp"].dt.floor("1min")
+                time_grouped = time_df.groupby("minute").agg(
+                    total=("interaction", "count"),
+                    bought=("interaction", lambda x: (x == "picked_product").sum()),
+                ).reset_index()
+                time_grouped["conversion_pct"] = (time_grouped["bought"] / time_grouped["total"] * 100).round(1)
+                fig_time = px.line(
+                    time_grouped,
+                    x="minute",
+                    y="conversion_pct",
+                    title="Purchase Conversion % Per Minute",
+                    labels={"minute": "Time", "conversion_pct": "Conversion %"},
+                    markers=True,
+                )
+                fig_time.update_layout(yaxis_range=[0, 100])
+                st.plotly_chart(fig_time, use_container_width=True)
+
+        # ── Recent interactions log ──
+        st.subheader("Recent Interactions")
+        display_cols = ["timestamp", "customer_id", "shelf_id", "dwell_time_seconds", "status"]
+        available_cols = [c for c in display_cols if c in filtered.columns]
+        recent = filtered.sort_values("timestamp", ascending=False).head(50)
+        st.dataframe(recent[available_cols], use_container_width=True, hide_index=True)
+
+        # ── Taken-item images gallery ──
+        has_images = "item_image_path" in filtered.columns
+        if has_images:
+            taken = filtered[filtered["item_image_path"].notna() & (filtered["item_image_path"] != "")]
+            taken = taken.sort_values("timestamp", ascending=False).head(12)
+            if not taken.empty:
+                st.subheader("📸 Taken Items (Disappearance Snapshots)")
+                cols = st.columns(min(4, len(taken)))
+                for idx, (_, row) in enumerate(taken.iterrows()):
+                    col = cols[idx % len(cols)]
+                    img_path = Path(row["item_image_path"])
+                    if img_path.exists():
+                        col.image(str(img_path), caption=f'{row.get("shelf_id", "")} — {row.get("timestamp", "")}', use_container_width=True)
+                    else:
+                        col.warning(f"Image not found: {img_path.name}")
+    else:
+        st.info("No customer interaction data yet.")
+else:
+    st.info("No customer data available.")
+
+
+# ──────────────────────────────────────────────
 # Promotion Suggestions
 # ──────────────────────────────────────────────
 
@@ -158,6 +297,5 @@ else:
 # Auto-refresh every 30 seconds
 # ──────────────────────────────────────────────
 
-st.caption("Dashboard auto-refreshes every 30 seconds.")
-time.sleep(30)
-st.rerun()
+st.caption("Dashboard auto-refreshes every 30 seconds (data cached with TTL=30s).")
+st.button("Refresh now", on_click=st.cache_data.clear)

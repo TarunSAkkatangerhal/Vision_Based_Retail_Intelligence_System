@@ -1,4 +1,5 @@
 import logging
+import time as _time
 import requests
 from datetime import datetime, timezone
 
@@ -20,16 +21,19 @@ logger = logging.getLogger(__name__)
 # Utility functions
 # ──────────────────────────────────────────────
 
-def send_to_api(endpoint: str, data: dict) -> dict | None:
-    """POST JSON data to API_BASE_URL + endpoint and return the JSON response."""
+def send_to_api(endpoint: str, data: dict, retries: int = 3) -> dict | None:
+    """POST JSON data to API_BASE_URL + endpoint with retry logic."""
     url = f"{API_BASE_URL}{endpoint}"
-    try:
-        response = requests.post(url, json=data, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        logger.error("Failed to send data to %s: %s", url, e)
-        return None
+    for attempt in range(retries):
+        try:
+            response = requests.post(url, json=data, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error("Attempt %d/%d failed for %s: %s", attempt + 1, retries, url, e)
+            if attempt < retries - 1:
+                _time.sleep(min(2 ** attempt, 4))  # 1s, 2s, 4s backoff
+    return None
 
 
 def get_current_timestamp() -> str:

@@ -1,0 +1,26 @@
+{
+  "shelves": [
+    {
+      "name": "a",
+      "x_min": 4,
+      "y_min": 295,
+      "x_max": 241,
+      "y_max": 473,
+      "expected_products": [
+        "aa"
+      ]
+    },
+    {
+      "name": "b",
+      "x_min": 248,
+      "y_min": 308,
+      "x_max": 446,
+      "y_max": 479,
+      "expected_products": [
+        "bb"
+      ]
+    }
+  ],
+  "frame_width": 640,
+  "frame_height": 480
+}

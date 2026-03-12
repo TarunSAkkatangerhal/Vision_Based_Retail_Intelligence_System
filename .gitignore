@@ -40,7 +40,7 @@ desktop.ini
 runs/
 wandb/
 *.pt
-!yolov8n.pt
+*.task
 
 # ──────────────────────────────────────────────
 # Database
@@ -61,6 +61,25 @@ dataset/sample_video.mp4
 !dataset/images/val/.gitkeep
 !dataset/labels/train/.gitkeep
 !dataset/labels/val/.gitkeep
+
+# ──────────────────────────────────────────────
+# Video files
+# ──────────────────────────────────────────────
+video/*.mp4
+video/*.avi
+video/*.mov
+video/*.mkv
+
+# ──────────────────────────────────────────────
+# Test images
+# ──────────────────────────────────────────────
+test_frame*.jpg
+test_frame*.png
+
+# ──────────────────────────────────────────────
+# Windows reserved names
+# ──────────────────────────────────────────────
+nul
 
 # ──────────────────────────────────────────────
 # Logs / Misc

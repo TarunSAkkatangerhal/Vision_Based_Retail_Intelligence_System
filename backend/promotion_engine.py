@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -11,12 +12,21 @@ from backend.database import insert_promotions
 
 logger = logging.getLogger(__name__)
 
+# Only analyse data from the last N hours
+_TIME_WINDOW_HOURS = 24
+
 
 def _get_connection() -> sqlite3.Connection:
     """Return a new connection to the SQLite database."""
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _time_cutoff() -> str:
+    """Return ISO timestamp for the start of the analysis window."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_TIME_WINDOW_HOURS)
+    return cutoff.isoformat()
 
 
 # ──────────────────────────────────────────────
@@ -74,8 +84,13 @@ def _detect_low_stock_high_interest() -> List[Dict[str, Any]]:
       • The shelf appears frequently in customer_logs
     """
     conn = _get_connection()
-    inv_df = pd.read_sql_query("SELECT * FROM inventory_logs", conn)
-    cust_df = pd.read_sql_query("SELECT * FROM customer_logs", conn)
+    cutoff = _time_cutoff()
+    inv_df = pd.read_sql_query(
+        "SELECT * FROM inventory_logs WHERE timestamp > ?", conn, params=(cutoff,)
+    )
+    cust_df = pd.read_sql_query(
+        "SELECT * FROM customer_logs WHERE timestamp > ?", conn, params=(cutoff,)
+    )
     conn.close()
 
     if inv_df.empty:

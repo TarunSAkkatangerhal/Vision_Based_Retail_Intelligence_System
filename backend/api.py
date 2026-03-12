@@ -1,7 +1,10 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from shared.schemas import (
@@ -15,6 +18,8 @@ from backend.database import (
     insert_inventory,
     insert_customers,
     get_promotions,
+    get_inventory_logs,
+    get_customer_logs,
     check_health,
 )
 from backend.promotion_engine import generate_promotions
@@ -36,6 +41,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Retail Intelligence API", version="1.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve cropped item images as static files
+_taken_items_dir = Path("taken_items")
+_taken_items_dir.mkdir(exist_ok=True)
+app.mount("/taken_items", StaticFiles(directory=str(_taken_items_dir)), name="taken_items")
 
 
 # ──────────────────────────────────────────────
@@ -88,6 +105,40 @@ async def get_promotions_endpoint():
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         logger.error("GET /promotions failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ──────────────────────────────────────────────
+# GET /inventory/logs
+# ──────────────────────────────────────────────
+
+@app.get("/inventory/logs")
+async def get_inventory_logs_endpoint(
+    shelf_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """Return recent inventory log entries."""
+    try:
+        return get_inventory_logs(shelf_id=shelf_id, limit=limit)
+    except Exception as e:
+        logger.error("GET /inventory/logs failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ──────────────────────────────────────────────
+# GET /customers/logs
+# ──────────────────────────────────────────────
+
+@app.get("/customers/logs")
+async def get_customer_logs_endpoint(
+    shelf_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """Return recent customer behaviour log entries."""
+    try:
+        return get_customer_logs(shelf_id=shelf_id, limit=limit)
+    except Exception as e:
+        logger.error("GET /customers/logs failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

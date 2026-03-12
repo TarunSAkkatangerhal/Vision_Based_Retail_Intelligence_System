@@ -3,3 +3,4 @@ uvicorn
 pydantic
 pandas
 requests
+deep_sort_realtime

@@ -70,6 +70,18 @@ _tracker = None
 # Per-track position history: track_id -> list[(cx, cy)]
 _track_positions: Dict[str, List[Tuple[float, float]]] = {}
 
+# Track IDs seen in the current frame — used for stale track cleanup
+_MAX_STALE_TRACKS = 200
+
+# Inference settings for speed
+_INFER_SIZE = 640
+_USE_HALF = False
+try:
+    import torch
+    _USE_HALF = torch.cuda.is_available()
+except ImportError:
+    pass
+
 
 def _load_person_model():
     """Load the pretrained YOLOv8 person detection model (once)."""
@@ -142,28 +154,39 @@ def _mock_customers() -> dict:
 # Main detection entry-point
 # ──────────────────────────────────────────────
 
-def detect_customers(frame: np.ndarray) -> Dict[str, Any]:
+def detect_customers(
+    frame: np.ndarray,
+    shelf_counts: Dict[str, int] | None = None,
+) -> tuple[Dict[str, Any], list]:
     """
     Detect and track customers in a single frame.
 
-    When MOCK_MODE is True the function returns hardcoded sample data
-    without loading any model or using GPU.
+    Args:
+        frame:         BGR video frame.
+        shelf_counts:  {shelf_id: item_count} from the latest inventory
+                       detection.  Used to determine pick/replace interactions.
 
     Returns:
-        dict matching the Customer Behavior Schema.
+        Tuple of:
+        - dict matching the Customer Behavior Schema
+        - list of person bounding boxes [{"bbox": [x1,y1,x2,y2], "confidence": float}]
     """
+    if shelf_counts is None:
+        shelf_counts = {}
+
     if MOCK_MODE:
-        return _mock_customers()
+        return _mock_customers(), []
 
     model = _load_person_model()
     tracker = _get_tracker()
 
     # ── YOLOv8 person detection ──
-    results = model(frame, verbose=False)
+    results = model(frame, verbose=False, imgsz=_INFER_SIZE, half=_USE_HALF)
 
     # Build a list of detections in the format DeepSort expects:
     # Each detection is ([left, top, w, h], confidence, class_name)
     raw_detections: List[Tuple[List[float], float, str]] = []
+    person_boxes: list = []  # for display in main.py
 
     for result in results:
         boxes = result.boxes
@@ -179,6 +202,7 @@ def detect_customers(frame: np.ndarray) -> Dict[str, Any]:
             w = x2 - x1
             h = y2 - y1
             raw_detections.append(([x1, y1, w, h], confidence, "person"))
+            person_boxes.append({"bbox": [x1, y1, x2, y2], "confidence": confidence})
 
     # ── DeepSort tracking ──
     tracks = tracker.update_tracks(raw_detections, frame=frame)
@@ -209,8 +233,9 @@ def detect_customers(frame: np.ndarray) -> Dict[str, Any]:
         # Dwell time
         dwell = calculate_dwell_time(track_id, position, SHELF_REGIONS)
 
-        # Interaction
-        interaction = detect_interaction(track_id, _track_positions[track_id])
+        # Interaction — based on shelf item count changes
+        shelf_count = shelf_counts.get(shelf_id, 0)
+        interaction = detect_interaction(track_id, shelf_id, shelf_count, dwell)
 
         customers.append(
             CustomerItem(
@@ -231,4 +256,16 @@ def detect_customers(frame: np.ndarray) -> Dict[str, Any]:
     # Validate via Pydantic and return dict
     validated = CustomerBehaviorData.model_validate(behaviour.model_dump())
     logger.info("Detected %d customers in frame.", len(validated.customers))
-    return validated.model_dump()
+
+    # Clean up stale tracks that are no longer active
+    active_ids = {str(t.track_id) for t in tracks if t.is_confirmed()}
+    stale_ids = [tid for tid in _track_positions if tid not in active_ids]
+    for tid in stale_ids:
+        del _track_positions[tid]
+    # Hard cap as safety net
+    if len(_track_positions) > _MAX_STALE_TRACKS:
+        oldest = sorted(_track_positions, key=lambda t: len(_track_positions[t]))[:len(_track_positions) - _MAX_STALE_TRACKS]
+        for tid in oldest:
+            del _track_positions[tid]
+
+    return validated.model_dump(), person_boxes

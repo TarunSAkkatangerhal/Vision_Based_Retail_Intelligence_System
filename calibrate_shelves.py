@@ -191,7 +191,7 @@ def grab_frame(source):
 
 
 def main():
-    global current_frame, display_frame, shelves
+    global current_frame, display_frame, shelves, drawing, start_x, start_y, end_x, end_y
 
     parser = argparse.ArgumentParser(description="Shelf Calibration Tool")
     parser.add_argument("--source", default=0,
