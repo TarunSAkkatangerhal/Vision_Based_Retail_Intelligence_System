@@ -12,19 +12,28 @@ Usage:
     python main.py 0                        # webcam
 
 Flags:
+    --skeleton      Enable skeleton pose estimation
     --no-skeleton   Fall back to bounding-box person detection
     --no-auto-shelf Use only manually calibrated shelf regions
 """
 
 import sys
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import time
+from queue import Empty, Full, Queue
+from threading import Event, Thread
 
 import cv2
 import numpy as np
 
 from shared.utils import send_to_api
-from shared.config import PROCESS_EVERY_N_FRAMES
+from shared.config import (
+    API_QUEUE_MAXSIZE,
+    ENABLE_SKELETON,
+    FRAME_PROCESS_HEIGHT,
+    FRAME_PROCESS_WIDTH,
+    PROCESS_EVERY_N_FRAMES,
+)
 from shared.video_loader import get_frame_generator
 from vision.inventory import detect_inventory, SHELF_REGIONS as MANUAL_SHELF_REGIONS
 from vision.product_detection import detect_products
@@ -35,8 +44,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SOURCE = "0"
 
-# Parse simple flags
-_USE_SKELETON = "--no-skeleton" not in sys.argv
+# Parse simple flags. Skeleton is opt-in because YOLO + MediaPipe is expensive.
+_USE_SKELETON = ("--skeleton" in sys.argv or ENABLE_SKELETON) and "--no-skeleton" not in sys.argv
 _USE_AUTO_SHELF = "--no-auto-shelf" not in sys.argv
 
 # Colours for drawing (BGR)
@@ -45,13 +54,44 @@ _COLOR_PERSON = (255, 0, 0)     # blue for people
 _COLOR_TEXT_BG = (0, 0, 0)      # black background for text
 _COLOR_SHELF = (0, 165, 255)    # orange for auto-detected shelf regions
 
-# Thread pool for non-blocking API calls
-_api_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="api")
+# Bounded API queue: the video loop never waits for HTTP, and slow backends
+# cannot build an unbounded backlog.
+_api_queue: Queue[tuple[str, dict]] = Queue(maxsize=API_QUEUE_MAXSIZE)
+_api_stop = Event()
+
+
+def _api_worker() -> None:
+    while not _api_stop.is_set():
+        try:
+            endpoint, data = _api_queue.get(timeout=0.2)
+        except Empty:
+            continue
+        try:
+            send_to_api(endpoint, data)
+        finally:
+            _api_queue.task_done()
+
+
+_api_thread = Thread(target=_api_worker, name="api-worker", daemon=True)
+_api_thread.start()
 
 
 def _post_async(endpoint: str, data: dict) -> None:
     """Fire-and-forget API POST so it doesn't block the video loop."""
-    _api_pool.submit(send_to_api, endpoint, data)
+    try:
+        _api_queue.put_nowait((endpoint, data))
+    except Full:
+        logger.warning("API queue full; dropping %s event.", endpoint)
+
+
+def _resize_for_processing(frame: np.ndarray) -> np.ndarray:
+    """Resize frames before model inference to cap compute cost."""
+    if FRAME_PROCESS_WIDTH <= 0 or FRAME_PROCESS_HEIGHT <= 0:
+        return frame
+    h, w = frame.shape[:2]
+    if w == FRAME_PROCESS_WIDTH and h == FRAME_PROCESS_HEIGHT:
+        return frame
+    return cv2.resize(frame, (FRAME_PROCESS_WIDTH, FRAME_PROCESS_HEIGHT), interpolation=cv2.INTER_AREA)
 
 
 def _interpolate_boxes(prev: list, curr: list, alpha: float) -> list:
@@ -78,7 +118,8 @@ def _draw_detections(display_frame: np.ndarray,
                      person_detections: list,
                      customer_data: dict,
                      shelf_regions: list = None,
-                     use_skeleton: bool = False) -> np.ndarray:
+                     use_skeleton: bool = False,
+                     fps: float | None = None) -> np.ndarray:
     """Draw bounding boxes / skeletons and labels on the frame for display."""
 
     # ── Draw auto-detected shelf regions (orange dashed rectangles) ──
@@ -135,8 +176,9 @@ def _draw_detections(display_frame: np.ndarray,
     shelf_mode = "auto" if (shelf_regions and any(
         r.get("auto_detected") for r in shelf_regions)) else "manual"
     track_mode = "skeleton" if use_skeleton else "bbox"
+    fps_text = f" | FPS: {fps:.1f}" if fps is not None else ""
     status = (f"Products: {n_products} | Customers: {n_customers} | "
-              f"Shelves: {shelf_mode} | Tracking: {track_mode} | 'q' to quit")
+              f"Shelves: {shelf_mode} | Tracking: {track_mode}{fps_text} | 'q' to quit")
     cv2.rectangle(display_frame, (0, 0), (len(status) * 9 + 10, 30), _COLOR_TEXT_BG, -1)
     cv2.putText(display_frame, status, (5, 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -166,10 +208,20 @@ def main() -> None:
     # Previous detections for smooth interpolation
     prev_product_detections: list = []
     prev_person_detections: list = []
+    fps_ema: float | None = None
+    last_tick = time.perf_counter()
 
     for frame_idx, frame in enumerate(get_frame_generator(source)):
         total_frames += 1
+        frame = _resize_for_processing(frame)
         h, w = frame.shape[:2]
+
+        now = time.perf_counter()
+        dt = now - last_tick
+        last_tick = now
+        if dt > 0:
+            instant_fps = 1.0 / dt
+            fps_ema = instant_fps if fps_ema is None else (0.9 * fps_ema + 0.1 * instant_fps)
 
         # Smooth interpolation between detection frames
         if frame_idx % PROCESS_EVERY_N_FRAMES != 0 and PROCESS_EVERY_N_FRAMES > 1:
@@ -190,6 +242,7 @@ def main() -> None:
                 display, draw_products, draw_persons, last_customer_data,
                 shelf_regions=active_shelf_regions,
                 use_skeleton=_USE_SKELETON,
+                fps=fps_ema,
             )
             cv2.imshow("Retail Intelligence System", display)
         except Exception as e:
@@ -273,6 +326,8 @@ def main() -> None:
             # Keep running — don't let one bad frame kill the pipeline
 
     cv2.destroyAllWindows()
+    _api_stop.set()
+    _api_thread.join(timeout=0.5)
 
     # ── Summary ──
     print()

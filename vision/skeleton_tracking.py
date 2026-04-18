@@ -27,6 +27,8 @@ from shared.config import (
     CAMERA_ID,
     MOCK_MODE,
     PERSON_CONFIDENCE_THRESHOLD,
+    SKELETON_NEAR_SHELF_ONLY,
+    SKELETON_SHELF_MARGIN,
 )
 from shared.schemas import CustomerBehaviorData, CustomerItem
 from shared.utils import get_current_timestamp
@@ -85,6 +87,15 @@ _MAX_STALE_TRACKS = 200
 
 # Track exit state: track_id -> {"shelf_id", "baseline_count", "dwell", "entered_at"}
 _track_shelf_visits: Dict[str, Dict] = {}
+
+_USE_HALF = False
+_DEVICE = "cpu"
+try:
+    import torch
+    _USE_HALF = torch.cuda.is_available()
+    _DEVICE = 0 if _USE_HALF else "cpu"
+except ImportError:
+    pass
 
 # ── Model file for PoseLandmarker ──
 _POSE_MODEL_FILENAME = "pose_landmarker_lite.task"
@@ -147,8 +158,29 @@ def _get_tracker():
     return _tracker
 
 
+def _bbox_near_shelf(bbox: List[int], shelf_regions: List[Dict]) -> bool:
+    """Return True when a person bbox is close enough to any shelf region."""
+    if not shelf_regions:
+        return True
+
+    x1, y1, x2, y2 = bbox
+    cx = (x1 + x2) / 2
+    cy = (y1 + y2) / 2
+
+    for region in shelf_regions:
+        rx1 = region.get("x_min", 0) - SKELETON_SHELF_MARGIN
+        ry1 = region.get("y_min", 0) - SKELETON_SHELF_MARGIN
+        rx2 = region.get("x_max", 0) + SKELETON_SHELF_MARGIN
+        ry2 = region.get("y_max", 0) + SKELETON_SHELF_MARGIN
+        if rx1 <= cx <= rx2 and ry1 <= cy <= ry2:
+            return True
+
+    return False
+
+
 def _extract_persons_from_pose(
     frame: np.ndarray,
+    shelf_regions: List[Dict] | None = None,
 ) -> List[Dict[str, Any]]:
     """
     Run YOLOv8 for person detection + MediaPipe PoseLandmarker on each crop.
@@ -161,13 +193,10 @@ def _extract_persons_from_pose(
         - right_wrist: (x, y) or None
         - confidence: float
     """
-    import mediapipe as mp
-
     yolo = _load_yolo_model()
-    pose = _load_pose_detector()
 
     # Step 1: Detect persons with YOLOv8 (fast, multi-person)
-    results = yolo(frame, verbose=False, imgsz=640)
+    results = yolo(frame, verbose=False, imgsz=640, half=_USE_HALF, device=_DEVICE)
     person_crops = []
 
     for result in results:
@@ -182,6 +211,23 @@ def _extract_persons_from_pose(
                 "bbox": [x1, y1, x2, y2],
                 "confidence": conf,
             })
+
+    if SKELETON_NEAR_SHELF_ONLY:
+        before = len(person_crops)
+        person_crops = [
+            crop for crop in person_crops
+            if _bbox_near_shelf(crop["bbox"], shelf_regions or [])
+        ]
+        skipped = before - len(person_crops)
+        if skipped:
+            logger.debug("Skipped skeleton pose on %d person(s) away from shelves.", skipped)
+
+    if not person_crops:
+        return []
+
+    import mediapipe as mp
+
+    pose = _load_pose_detector()
 
     # Step 2: Run pose estimation on each person crop
     h, w = frame.shape[:2]
@@ -274,7 +320,7 @@ def detect_customers_skeleton(
         return _mock_customers(), []
 
     tracker = _get_tracker()
-    persons = _extract_persons_from_pose(frame)
+    persons = _extract_persons_from_pose(frame, shelf_regions=shelf_regions)
 
     # Build DeepSort detections: ([left, top, w, h], confidence, class)
     raw_detections = []

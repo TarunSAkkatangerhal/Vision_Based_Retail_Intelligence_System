@@ -6,7 +6,13 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from shared.config import MODEL_PATHS, PRODUCT_CONFIDENCE_THRESHOLD, PRODUCT_CLASSES
+from shared.config import (
+    MODEL_PATHS,
+    PRODUCT_CONFIDENCE_THRESHOLD,
+    PRODUCT_CLASSES,
+    PRODUCT_ENABLE_TILING,
+    PRODUCT_INFER_SIZE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -15,28 +21,30 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 
 _product_model: YOLO | None = None
-_model_is_trained: bool = False   # True → custom trained model, False → YOLOWorld
+_model_is_trained: bool = False   # True when using the custom inventory model.
 
 # Path to the trained model produced by dataset/train_sku110k.py
 _TRAINED_MODEL_PATH = Path("models/inventory_yolo.pt")
 
 # Inference image size — larger helps detect small shelf items
-_INFER_SIZE = 1280
+_INFER_SIZE = PRODUCT_INFER_SIZE
 
 # If a frame is smaller than this width, upscale it for better detection
 _MIN_WIDTH_FOR_DETECTION = 640
 _MAX_UPSCALE = 3.0  # allow up to 3x for very low-res feeds
 
 # SAHI-style tiled detection settings
-_TILE_ENABLED = True          # Enable tiled detection for small products
+_TILE_ENABLED = PRODUCT_ENABLE_TILING  # Enable tiled detection for small products
 _TILE_OVERLAP_RATIO = 0.35    # 35% overlap between tiles (more overlap = fewer misses)
 _NMS_IOU_THRESHOLD = 0.45     # IoU threshold for merging duplicate detections
 
 # Use half-precision (FP16) if a CUDA GPU is available
 _USE_HALF = False
+_DEVICE = "cpu"
 try:
     import torch
     _USE_HALF = torch.cuda.is_available()
+    _DEVICE = 0 if _USE_HALF else "cpu"
 except ImportError:
     pass
 
@@ -46,32 +54,38 @@ def _load_model() -> YOLO:
     Load the best available product detection model (once).
 
     Priority:
-      1. Custom trained model (models/inventory_yolo.pt) — trained on SKU-110K,
-         single-class "product" detector, highly accurate for dense shelves.
-      2. YOLOWorld open-vocabulary model — zero-shot fallback when no trained
-         model exists yet.
+      1. MODEL_INVENTORY / configured default (fast path defaults to yolov8n.pt).
+      2. Custom trained model (models/inventory_yolo.pt) if the configured
+         model is missing.
     """
     global _product_model, _model_is_trained
 
     if _product_model is not None:
         return _product_model
 
-    if _TRAINED_MODEL_PATH.exists():
-        logger.info("Loading TRAINED product model from: %s", _TRAINED_MODEL_PATH)
-        _product_model = YOLO(str(_TRAINED_MODEL_PATH))
-        _model_is_trained = True
-        logger.info("Trained model ready — single-class dense product detector.")
+    configured_model_path = Path(MODEL_PATHS["inventory"])
+    model_path = configured_model_path
+    if not model_path.exists() and _TRAINED_MODEL_PATH.exists():
+        model_path = _TRAINED_MODEL_PATH
+
+    logger.info("Loading product model from: %s", model_path)
+    _product_model = YOLO(str(model_path))
+    _model_is_trained = model_path.name.startswith("inventory_yolo")
+
+    if _model_is_trained:
+        logger.info("Trained product model ready.")
     else:
-        model_path = MODEL_PATHS["inventory"]
-        logger.info("No trained model found at %s — using YOLOWorld fallback: %s",
-                     _TRAINED_MODEL_PATH, model_path)
-        _product_model = YOLO(model_path)
-        _product_model.set_classes(PRODUCT_CLASSES)
-        _model_is_trained = False
-        logger.info("YOLOWorld ready — detecting classes: %s", PRODUCT_CLASSES)
+        model_name = model_path.name.lower()
+        if "world" in model_name and hasattr(_product_model, "set_classes"):
+            _product_model.set_classes(PRODUCT_CLASSES)
+            logger.info("YOLOWorld ready - detecting classes: %s", PRODUCT_CLASSES)
+        else:
+            logger.info(
+                "Generic YOLO model ready. Set MODEL_INVENTORY to a trained product model "
+                "for better product labels."
+            )
 
     return _product_model
-
 
 # ──────────────────────────────────────────────
 # Detection function
@@ -123,7 +137,7 @@ def detect_products(frame: np.ndarray) -> List[Dict[str, Any]]:
     all_detections: List[Dict[str, Any]] = []
 
     # ── Pass 1: Full-frame detection ──
-    results = model(detect_frame, verbose=False, imgsz=_INFER_SIZE, half=_USE_HALF)
+    results = model(detect_frame, verbose=False, imgsz=_INFER_SIZE, half=_USE_HALF, device=_DEVICE)
     for result in results:
         for box in result.boxes:
             confidence = float(box.conf[0])
@@ -154,7 +168,7 @@ def detect_products(frame: np.ndarray) -> List[Dict[str, Any]]:
                 if tile.size == 0:
                     continue
 
-                tile_results = model(tile, verbose=False, imgsz=640, half=_USE_HALF)
+                tile_results = model(tile, verbose=False, imgsz=640, half=_USE_HALF, device=_DEVICE)
                 for result in tile_results:
                     for box in result.boxes:
                         confidence = float(box.conf[0])

@@ -76,9 +76,11 @@ _MAX_STALE_TRACKS = 200
 # Inference settings for speed
 _INFER_SIZE = 640
 _USE_HALF = False
+_DEVICE = "cpu"
 try:
     import torch
     _USE_HALF = torch.cuda.is_available()
+    _DEVICE = 0 if _USE_HALF else "cpu"
 except ImportError:
     pass
 
@@ -181,7 +183,7 @@ def detect_customers(
     tracker = _get_tracker()
 
     # ── YOLOv8 person detection ──
-    results = model(frame, verbose=False, imgsz=_INFER_SIZE, half=_USE_HALF)
+    results = model(frame, verbose=False, imgsz=_INFER_SIZE, half=_USE_HALF, device=_DEVICE)
 
     # Build a list of detections in the format DeepSort expects:
     # Each detection is ([left, top, w, h], confidence, class_name)
